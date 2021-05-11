@@ -4,6 +4,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	capabilitykeeper "github.com/cosmos/cosmos-sdk/x/capability/keeper"
+	wasmkeeper "github.com/cosmos/ibc-go/modules/core/28-wasm/keeper"
+	paramtypes "github.com/cosmos/cosmos-sdk/x/params/types"
 	clientkeeper "github.com/cosmos/ibc-go/modules/core/02-client/keeper"
 	clienttypes "github.com/cosmos/ibc-go/modules/core/02-client/types"
 	connectionkeeper "github.com/cosmos/ibc-go/modules/core/03-connection/keeper"
@@ -11,7 +13,6 @@ import (
 	portkeeper "github.com/cosmos/ibc-go/modules/core/05-port/keeper"
 	porttypes "github.com/cosmos/ibc-go/modules/core/05-port/types"
 	"github.com/cosmos/ibc-go/modules/core/types"
-	paramtypes "github.com/cosmos/cosmos-sdk/x/params/types"
 )
 
 var _ types.QueryServer = (*Keeper)(nil)
@@ -27,6 +28,7 @@ type Keeper struct {
 	ConnectionKeeper connectionkeeper.Keeper
 	ChannelKeeper    channelkeeper.Keeper
 	PortKeeper       portkeeper.Keeper
+	WasmKeeper       wasmkeeper.Keeper
 	Router           *porttypes.Router
 }
 
@@ -40,6 +42,9 @@ func NewKeeper(
 	connectionKeeper := connectionkeeper.NewKeeper(cdc, key, clientKeeper)
 	portKeeper := portkeeper.NewKeeper(scopedKeeper)
 	channelKeeper := channelkeeper.NewKeeper(cdc, key, clientKeeper, connectionKeeper, portKeeper, scopedKeeper)
+	wasmKeeper := wasmkeeper.NewKeeper(cdc, key, &wasmkeeper.WASMValidationConfig{
+		MaxSizeAllowed: 1024 * 1024,
+	})
 
 	return &Keeper{
 		cdc:              cdc,
@@ -47,6 +52,7 @@ func NewKeeper(
 		ConnectionKeeper: connectionKeeper,
 		ChannelKeeper:    channelKeeper,
 		PortKeeper:       portKeeper,
+		WasmKeeper:       wasmKeeper,
 	}
 }
 
