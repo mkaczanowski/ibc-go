@@ -137,23 +137,105 @@ func (c *ClientState) CheckSubstituteAndUpdateState(
 	substituteClientStore sdk.KVStore, substituteClient exported.ClientState,
 	initialHeight exported.Height,
 ) (exported.ClientState, error) {
-	// TODO: How to implement this method to be WASM compatible?
-	// Using the example of tendermint LC (modules/light-clients/07-tendermint/types/proposal_handle.go):
-	// * two client stores (subject + substitute) can't be passed to WASM at the same time (only one can go)
-	// * copying the client states in the loop might be expensive
-	// * binary marshaling ain't easy on the WASM contract side (at least not implemented afaik)
-	//
-	// One option that comes to mind is to split the call to WASM (ie. validation) and non-WASM (copying the client states)
-	// but it won't be pretty. The flow might look like this:
-	// 1. (WASM) validate subjectClient Consensus State and substituteClientState
-	// 2a. (Go) in the loop copy the conesnus state between store
-	// 2b. (WASM) post update (ie. set processing time)
-	// 3. (WASM) validate latest consensus state from subjectClientStore
-	//
-	// ^^ This flow has approximately:
-	//    * Wasm operations = 2 + n
-	//    * Go operations: n
-	return nil, sdkerrors.Wrap(clienttypes.ErrUpdateClientFailed, "CheckSubstituteAndUpdateState is not implemented for WASM client")
+	// NOTE: cosmwasm doesn't expose multi-storage call, therefore this call is split into 3 steps
+	// 1. Initial validation (WASM) - light client specific logic
+	// 2. Copy consensus states (Go) - the "Step 1" returns a list of consensus states heights that
+	//    should be copied from substituteStore to subjectStore
+	// 3. Post copy verification (WASM) - light client specific logic
+
+	consensusState, err := GetConsensusState(subjectClientStore, cdc, c.LatestHeight)
+	if err != nil {
+		return nil, sdkerrors.Wrapf(
+			err, "unexpected error: could not get consensus state from clientstore at height: %d", c.GetLatestHeight(),
+		)
+	}
+
+	const CheckSubstituteAndUpdateState = "checksubstituteandupdatestate"
+	payload := make(map[string]map[string]interface{})
+	payload[CheckSubstituteAndUpdateState] = make(map[string]interface{})
+	inner := payload[CheckSubstituteAndUpdateState]
+	inner["me"] = c
+	inner["consensus_state"] = consensusState
+	inner["substitute_client_state"] = substituteClient
+	inner["initial_height"] = initialHeight
+	inner["status"] = []interface{}{}
+	inner["phase"] = "pre"
+
+	// Step 1 (WASM): Run initial validation
+	encodedData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToMarshalPayload, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	out, err := callContract(c.CodeId, ctx, subjectClientStore, encodedData)
+	if err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToCall, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	output := clientStateCallResponse{}
+	if err := json.Unmarshal(out.Data, &output); err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToUnmarshalPayload, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	if !output.Result.IsValid {
+		return nil, fmt.Errorf("%s error ocurred while updating client state", output.Result.ErrorMsg)
+	}
+
+	output.resetImmutables(c)
+	c = output.NewClientState
+
+	// Step 2 (Go): copy selected consensus states
+	status := make([]struct {
+		success bool
+		height  exported.Height
+	}, len(output.Heights))
+
+	for i, height := range output.Heights {
+		status[i].height = height
+
+		consensusState, err := GetConsensusState(substituteClientStore, cdc, height)
+		if err != nil {
+			// not all consensus states will be filled in
+			continue
+		}
+
+		SetConsensusState(subjectClientStore, cdc, consensusState, height)
+		status[i].success = true
+	}
+
+	// Step 3 (WASM): Post-copy processing and validation
+	if len(output.Heights) == 0 {
+		return nil, fmt.Errorf("list of copyable consensus state heights can't be empty")
+	}
+	c.LatestHeight = &output.Heights[len(output.Heights)-1]
+
+	latestConsensusState, err := GetConsensusState(subjectClientStore, cdc, c.GetLatestHeight())
+	if err != nil {
+		return nil, sdkerrors.Wrapf(
+			err, "unexpected error: could not get consensus state for updated subject client from clientstore at height: %d", c.GetLatestHeight(),
+		)
+	}
+
+	inner["me"] = c
+	inner["phase"] = "post"
+	inner["consensus_state"] = latestConsensusState
+	inner["status"] = status
+
+	encodedData, err = json.Marshal(payload)
+	if err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToMarshalPayload, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	out, err = callContract(c.CodeId, ctx, subjectClientStore, encodedData)
+	if err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToCall, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	output = clientStateCallResponse{}
+	if err := json.Unmarshal(out.Data, &output); err != nil {
+		return nil, sdkerrors.Wrapf(ErrUnableToUnmarshalPayload, fmt.Sprintf("underlying error: %s", err.Error()))
+	}
+	if !output.Result.IsValid {
+		return nil, fmt.Errorf("%s error ocurred while updating client state", output.Result.ErrorMsg)
+	}
+
+	output.resetImmutables(c)
+	return output.NewClientState, nil
 }
 
 func (c *ClientState) VerifyUpgradeAndUpdateState(ctx sdk.Context, cdc codec.BinaryCodec, store sdk.KVStore, newClient exported.ClientState, newConsState exported.ConsensusState, proofUpgradeClient, proofUpgradeConsState []byte) (exported.ClientState, exported.ConsensusState, error) {

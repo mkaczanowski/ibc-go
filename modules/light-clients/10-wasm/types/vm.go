@@ -37,6 +37,7 @@ type clientStateCallResponse struct {
 	Me                *ClientState    `json:"me,omitempty"`
 	NewConsensusState *ConsensusState `json:"new_consensus_state,omitempty"`
 	NewClientState    *ClientState    `json:"new_client_state,omitempty"`
+	Heights           []types2.Height `json:"heights,omitempty"`
 	Result            contractResult  `json:"result,omitempty"`
 }
 
